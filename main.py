@@ -73,21 +73,21 @@ def check_market_env(date: str = None):
         return False, f"[{date}] 非A股交易日，不执行选股"
     
     try:
-        # 1. 非ST涨停家数
+        # 1. 非ST涨停家数（接口保留）
         limit_up_df = ak.stock_zt_pool_em(date=date)
         limit_up_df = limit_up_df[~limit_up_df['名称'].str.contains('ST|退', na=False)]
         limit_up_count = len(limit_up_df)
 
-        # 2. 非ST跌停家数
-        limit_down_df = ak.stock_dt_pool_em(date=date)
+        # 2. 非ST跌停家数（修复核心：替换为新版akshare跌停接口）
+        limit_down_df = ak.stock_limit_down_pool_em(date=date)  # 原错误接口：stock_dt_pool_em
         limit_down_df = limit_down_df[~limit_down_df['名称'].str.contains('ST|退', na=False)]
         limit_down_count = len(limit_down_df)
 
-        # 3. 市场最高连板高度
+        # 3. 市场最高连板高度（接口保留）
         strong_df = ak.stock_zt_pool_strong_em(date=date)
         max_lianban = strong_df['连板数'].max() if not strong_df.empty else 0
 
-        # 4. 上证指数涨跌幅与5日趋势
+        # 4. 上证指数涨跌幅与5日趋势（接口保留）
         index_df = ak.index_zh_a_hist(symbol="000001", period="daily", start_date=date, end_date=date)
         index_close = index_df['收盘'].iloc[0]
         index_open = index_df['开盘'].iloc[0]
@@ -96,7 +96,7 @@ def check_market_env(date: str = None):
         index_5day_df = ak.index_zh_a_hist(symbol="000001", period="daily", start_date=start_5day, end_date=date)
         index_5day_gain = (index_5day_df['收盘'].iloc[-1] - index_5day_df['收盘'].iloc[0]) / index_5day_df['收盘'].iloc[0] * 100
 
-        # 5. 炸板率
+        # 5. 炸板率（接口保留）
         explode_df = ak.stock_zt_pool_zbgc_em(date=date)
         explode_count = len(explode_df)
         total_try_limit = limit_up_count + explode_count
