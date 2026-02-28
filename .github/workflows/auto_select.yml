@@ -1,10 +1,9 @@
 name: 每日龙头股自动选股
 on:
   schedule:
-    # GitHub使用UTC时间，比北京时间晚8小时，以下对应北京时间10:30、15:00，周一到周五
-    - cron: '30 2 * * 1-5'
-    - cron: '0 7 * * 1-5'
-  workflow_dispatch: # 支持手动点击运行
+    # 仅A股交易日北京时间15:30收盘后运行1次（UTC时间7:30，周一到周五）
+    - cron: '30 7 * * 1-5'
+  workflow_dispatch: # 保留手动触发功能，随时可以手动运行
 
 jobs:
   auto-select-stock:
@@ -35,7 +34,7 @@ jobs:
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           git add 选股结果.txt
-          git commit -m "自动更新：$(date +'%Y-%m-%d')选股结果" || echo "无结果更新"
+          git commit -m "自动更新：$(date +'%Y-%m-%d')收盘选股结果" || echo "无结果更新"
           git push
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
