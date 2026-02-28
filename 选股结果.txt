@@ -1,4 +1,4 @@
 ===== 龙头战法选股结果 =====
-日期：2026-02-28 13:53:42
-市场状态：环境判定出错：('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))
+日期：2026-02-28 14:00:51
+市场状态：环境判定出错：module 'requests.exceptions' has no attribute 'RemoteDisconnected'
 
