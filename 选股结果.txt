@@ -1,4 +1,4 @@
 ===== 龙头战法选股结果 =====
-日期：2026-02-28 14:00:51
-市场状态：环境判定出错：module 'requests.exceptions' has no attribute 'RemoteDisconnected'
+日期：2026-02-28 14:05:54
+市场状态：[20251231] 无法获取涨停数据（无数据/网络异常）
 
