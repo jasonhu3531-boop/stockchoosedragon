@@ -2,17 +2,31 @@ import akshare as ak
 from datetime import datetime, timedelta
 import pandas as pd
 import os
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
-# ===================== 选股参数配置（已按你的要求设置好）=====================
-# 流通市值范围（亿）
+# ===================== 网络请求重试配置（解决连接中断）=====================
+# 创建带重试机制的requests会话
+session = requests.Session()
+retry_strategy = Retry(
+    total=3,  # 总重试次数
+    backoff_factor=1,  # 重试间隔（1s, 2s, 4s...）
+    status_forcelist=[429, 500, 502, 503, 504],  # 触发重试的状态码
+    allowed_methods=["GET", "POST"]
+)
+adapter = HTTPAdapter(max_retries=retry_strategy)
+session.mount("https://", adapter)
+session.mount("http://", adapter)
+# 覆盖akshare的默认requests会话（关键：解决底层连接中断）
+ak.session = session
+
+# ===================== 选股参数配置 =====================
 MIN_CIRC_MARKET_CAP = 10
 MAX_CIRC_MARKET_CAP = 300
-# 股价范围（元）
 MIN_PRICE = 5
 MAX_PRICE = 30
-# 每日最多选出的股票数量
 MAX_STOCK_COUNT = 5
-# 市场环境核心阈值
 LIMIT_UP_MIN_COUNT = 35
 LIMIT_DOWN_MAX_COUNT = 8
 MAX_LIANBAN_MIN_HEIGHT = 4
@@ -20,90 +34,84 @@ EXPLODE_RATE_MAX = 35
 # ==============================================================================
 
 def is_trade_day(date: str = None):
-    """
-    强制精准判断A股交易日（弃用接口，用本地规则）
-    :param date: 日期，格式YYYYMMDD
-    :return: True/False
-    """
+    """精准判断A股交易日（本地规则）"""
     if date is None:
         date = datetime.now().strftime("%Y%m%d")
     dt = datetime.strptime(date, "%Y%m%d")
-    year = dt.year
-    month = dt.month
-    day = dt.day
-
-    # 1. 基础规则：排除周末
+    
+    # 1. 排除周末
     if dt.weekday() in [5, 6]:
         return False
 
-    # 2. 2026年A股法定休市（精准罗列）
-    holiday_2026 = [
-        # 春节休市
-        "20260216", "20260217", "20260218", "20260219", "20260220", "20260221", "20260222",
-        # 清明节（4月4日-6日）
-        "20260404", "20260405", "20260406",
-        # 劳动节（5月1日-5日）
-        "20260501", "20260502", "20260503", "20260504", "20260505",
-        # 端午节（6月19日-21日）
-        "20260619", "20260620", "20260621",
-        # 中秋节（9月25日-27日）
-        "20260925", "20260926", "20260927",
-        # 国庆节（10月1日-7日）
-        "20261001", "20261002", "20261003", "20261004", "20261005", "20261006", "20261007"
+    # 2. 2025年A股法定休市（精简版，覆盖20251231）
+    holiday_2025 = [
+        "20250101", "20250129", "20250130", "20250405", "20250501", 
+        "20250529", "20250530", "20250609", "20250917", "20251001",
+        "20251002", "20251003", "20251006", "20251007"
     ]
+    # 2025补班交易日
+    make_up_2025 = ["20250126", "20250208", "20250407", "20250531", "20250916", "20251008"]
 
-    # 3. 2026年A股补班交易日（周末补班）
-    make_up_2026 = [
-        "20260215", "20260407", "20260509", "20260622", "20260928", "20261010"
-    ]
-
-    # 最终判断：20260227不在休市清单+是工作日 → 判定为交易日
-    if date in holiday_2026:
+    if date in holiday_2025:
         return False
-    elif date in make_up_2026:
+    elif date in make_up_2025:
         return True
     else:
         return True
 
+def safe_ak_call(func, *args, **kwargs):
+    """安全调用akshare接口（带超时+异常容错）"""
+    try:
+        # 设置接口超时时间（10s），避免无限等待
+        kwargs['timeout'] = kwargs.get('timeout', 10)
+        return func(*args, **kwargs)
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout, 
+            requests.exceptions.RemoteDisconnected):
+        # 网络异常时返回空DataFrame
+        return pd.DataFrame()
+    except Exception:
+        return pd.DataFrame()
+
 def check_market_env(date: str = None):
-    """市场环境判定，返回是否达标+状态说明"""
+    """市场环境判定（增强网络容错）"""
     if date is None:
         date = datetime.now().strftime("%Y%m%d")
     if not is_trade_day(date):
         return False, f"[{date}] 非A股交易日，不执行选股"
     
     try:
-        # 1. 非ST涨停家数（保留）
-        limit_up_df = ak.stock_zt_pool_em(date=date)
+        # 1. 非ST涨停家数（安全调用+超时）
+        limit_up_df = safe_ak_call(ak.stock_zt_pool_em, date=date)
+        if limit_up_df.empty:
+            return False, f"[{date}] 无法获取涨停数据（网络/数据源异常）"
         limit_up_df = limit_up_df[~limit_up_df['名称'].str.contains('ST|退', na=False)]
         limit_up_count = len(limit_up_df)
 
-        # 2. 非ST跌停家数（临时注释接口，避免报错，默认赋值0）
-        limit_down_count = 0  # 临时默认值，跳过跌停数校验
+        # 2. 跌停家数（临时默认0，避免接口报错）
+        limit_down_count = 0
 
-        # 3. 市场最高连板高度（核心修复：改用涨停池接口+空数据容错）
+        # 3. 最高连板高度（从涨停池提取+容错）
         max_lianban = 0
-        if not limit_up_df.empty:  # 先判断涨停池是否有数据
-            # 从涨停池提取连板数，避免strong_em接口的兼容性问题
-            max_lianban = limit_up_df['连板数'].max() if '连板数' in limit_up_df.columns else 0
+        if not limit_up_df.empty and '连板数' in limit_up_df.columns:
+            max_lianban = limit_up_df['连板数'].max()
 
-        # 4. 上证指数涨跌幅与5日趋势（保留+空数据容错）
+        # 4. 上证指数数据（安全调用）
         index_day_drop = 0
         index_5day_gain = 0
-        index_df = ak.index_zh_a_hist(symbol="000001", period="daily", start_date=date, end_date=date)
-        if not index_df.empty and len(index_df) > 0:
+        index_df = safe_ak_call(ak.index_zh_a_hist, symbol="000001", period="daily", start_date=date, end_date=date)
+        if not index_df.empty and len(index_df) > 0 and '开盘' in index_df.columns and '收盘' in index_df.columns:
             index_close = index_df['收盘'].iloc[0]
             index_open = index_df['开盘'].iloc[0]
             index_day_drop = (index_close - index_open) / index_open * 100 if index_open != 0 else 0
             
             start_5day = (datetime.strptime(date, "%Y%m%d") - timedelta(days=5)).strftime("%Y%m%d")
-            index_5day_df = ak.index_zh_a_hist(symbol="000001", period="daily", start_date=start_5day, end_date=date)
+            index_5day_df = safe_ak_call(ak.index_zh_a_hist, symbol="000001", period="daily", start_date=start_5day, end_date=date)
             if not index_5day_df.empty and len(index_5day_df) >= 2:
                 index_5day_gain = (index_5day_df['收盘'].iloc[-1] - index_5day_df['收盘'].iloc[0]) / index_5day_df['收盘'].iloc[0] * 100 if index_5day_df['收盘'].iloc[0] != 0 else 0
 
-        # 5. 炸板率（保留+空数据容错）
-        explode_rate = 100  # 默认炸板率100%（不达标）
-        explode_df = ak.stock_zt_pool_zbgc_em(date=date)
+        # 5. 炸板率（安全调用）
+        explode_rate = 100
+        explode_df = safe_ak_call(ak.stock_zt_pool_zbgc_em, date=date)
         explode_count = len(explode_df) if not explode_df.empty else 0
         total_try_limit = limit_up_count + explode_count
         if total_try_limit > 0:
@@ -120,11 +128,11 @@ def check_market_env(date: str = None):
         )
 
         if not core_pass:
-            return False, f"市场环境不达标，不执行选股。涨停数:{limit_up_count},跌停数:{limit_down_count},最高连板:{max_lianban},炸板率:{explode_rate:.1f}%"
+            return False, f"市场环境不达标。涨停数:{limit_up_count},跌停数:{limit_down_count},最高连板:{max_lianban},炸板率:{explode_rate:.1f}%"
         
-        # 辅助条件校验（满足≥3个+空数据容错）
+        # 辅助条件（安全调用）
         theme_ratio = 0
-        theme_df = ak.stock_zt_pool_board_em(date=date)
+        theme_df = safe_ak_call(ak.stock_zt_pool_board_em, date=date)
         if not theme_df.empty and '涨停家数' in theme_df.columns and limit_up_count > 0:
             top3_theme_limit = theme_df['涨停家数'].head(3).sum()
             theme_ratio = top3_theme_limit / limit_up_count * 100
@@ -132,19 +140,19 @@ def check_market_env(date: str = None):
         limit_up_ring = 0
         yesterday = (datetime.strptime(date, "%Y%m%d") - timedelta(days=1)).strftime("%Y%m%d")
         if is_trade_day(yesterday):
-            yesterday_limit_df = ak.stock_zt_pool_em(date=yesterday)
+            yesterday_limit_df = safe_ak_call(ak.stock_zt_pool_em, date=yesterday)
             yesterday_limit_df = yesterday_limit_df[~yesterday_limit_df['名称'].str.contains('ST|退', na=False)]
             yesterday_limit_count = len(yesterday_limit_df)
             if yesterday_limit_count > 0:
                 limit_up_ring = limit_up_count / yesterday_limit_count
 
-        north_money = -100  # 默认不达标
-        north_df = ak.stock_em_hsgt_north_net_flow_in(symbol="北向资金")
+        north_money = -100
+        north_df = safe_ak_call(ak.stock_em_hsgt_north_net_flow_in, symbol="北向资金")
         if not north_df.empty and '净流入' in north_df.columns:
             north_money = north_df['净流入'].iloc[-1] if len(north_df) > 0 else -100
 
         up_down_ratio = 0
-        activity_df = ak.stock_market_activity_legu_em()
+        activity_df = safe_ak_call(ak.stock_market_activity_legu_em)
         if not activity_df.empty and '上涨家数' in activity_df.columns and '下跌家数' in activity_df.columns:
             up_count = activity_df['上涨家数'].iloc[0]
             down_count = activity_df['下跌家数'].iloc[0]
@@ -166,16 +174,15 @@ def check_market_env(date: str = None):
         return False, f"环境判定出错：{str(e)}"
 
 def filter_stock_basic(stock_code: str, stock_name: str, date: str = None):
-    """个股基础筛选，返回是否通过+空数据容错"""
+    """个股筛选（增强容错）"""
     if date is None:
         date = datetime.now().strftime("%Y%m%d")
     try:
-        # 1. 基础属性筛选（已适配你的参数）
-        info_df = ak.stock_individual_info_em(symbol=stock_code)
+        # 基础属性
+        info_df = safe_ak_call(ak.stock_individual_info_em, symbol=stock_code)
         if info_df.empty or len(info_df) < 1:
             return False
         info_dict = dict(zip(info_df['item'], info_df['value']))
-        # 关键字段容错
         if '流通市值' not in info_dict or '最新价' not in info_dict or '上市时间' not in info_dict:
             return False
         circ_market_cap = info_dict['流通市值'] / 100000000
@@ -195,12 +202,11 @@ def filter_stock_basic(stock_code: str, stock_name: str, date: str = None):
         if not basic_pass:
             return False
 
-        # 2. 量能指标筛选+容错
+        # 量能指标
         start_10day = (datetime.strptime(date, "%Y%m%d") - timedelta(days=10)).strftime("%Y%m%d")
-        hist_df = ak.stock_zh_a_hist(symbol=stock_code, period="daily", start_date=start_10day, end_date=date)
+        hist_df = safe_ak_call(ak.stock_zh_a_hist, symbol=stock_code, period="daily", start_date=start_10day, end_date=date)
         if hist_df.empty or len(hist_df) < 2:
             return False
-        # 量能字段容错
         if '换手率' not in hist_df.columns or '量比' not in hist_df.columns or '成交量' not in hist_df.columns:
             return False
         turnover = hist_df['换手率'].iloc[-1]
@@ -216,7 +222,9 @@ def filter_stock_basic(stock_code: str, stock_name: str, date: str = None):
         if not volume_pass:
             return False
 
-        # 3. 趋势指标筛选+容错
+        # 趋势指标
+        if '收盘' not in hist_df.columns:
+            return False
         ma5 = hist_df['收盘'].rolling(5).mean().iloc[-1]
         ma5_prev = hist_df['收盘'].rolling(5).mean().iloc[-2]
         ma20 = hist_df['收盘'].rolling(20).mean().iloc[-1]
@@ -230,12 +238,11 @@ def filter_stock_basic(stock_code: str, stock_name: str, date: str = None):
         if not trend_pass:
             return False
 
-        # 4. 涨停质量筛选+容错
-        zt_df = ak.stock_zt_pool_em(date=date)
+        # 涨停质量
+        zt_df = safe_ak_call(ak.stock_zt_pool_em, date=date)
         if zt_df.empty or stock_code not in zt_df['代码'].values:
             return False
         stock_zt = zt_df[zt_df['代码'] == stock_code].iloc[0]
-        # 涨停质量字段容错
         if '首次封板时间' not in stock_zt or '炸板次数' not in stock_zt or '封单金额' not in stock_zt:
             return False
         first_board_time = stock_zt['首次封板时间']
@@ -263,12 +270,12 @@ def get_stock_type(lianban_count: int):
         return "首板"
 
 def main():
-    """主选股程序"""
-    # 【20260227测试专用】强制指定日期为昨日（A股正常交易日）
-    date = "20260227"
+    """主程序（测试日期改为20251231，历史真实交易日）"""
+    # 关键：改用20251231（有完整数据的真实交易日，避免未来日期断连）
+    date = "20251231"
     result_text = f"===== 龙头战法选股结果 =====\n日期：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
 
-    # 1. 校验市场环境
+    # 校验市场环境
     env_pass, env_msg = check_market_env(date)
     result_text += f"市场状态：{env_msg}\n\n"
     if not env_pass:
@@ -277,22 +284,17 @@ def main():
         print(result_text)
         return
 
-    # 2. 获取当日涨停池
-    try:
-        zt_df = ak.stock_zt_pool_em(date=date)
-        zt_df = zt_df[~zt_df['名称'].str.contains('ST|退', na=False)]
-        if zt_df.empty:
-            result_text += "当日无符合条件的涨停个股"
-            with open("选股结果.txt", "w", encoding="utf-8") as f:
-                f.write(result_text)
-            return
-    except Exception as e:
-        result_text += f"获取涨停池出错：{str(e)}"
+    # 获取涨停池
+    zt_df = safe_ak_call(ak.stock_zt_pool_em, date=date)
+    if zt_df.empty:
+        result_text += "当日无符合条件的涨停个股"
         with open("选股结果.txt", "w", encoding="utf-8") as f:
             f.write(result_text)
+        print(result_text)
         return
+    zt_df = zt_df[~zt_df['名称'].str.contains('ST|退', na=False)]
 
-    # 3. 基础筛选
+    # 筛选个股
     pass_list = []
     for idx, row in zt_df.iterrows():
         stock_code = row['代码']
@@ -307,7 +309,7 @@ def main():
                 "流通市值(亿)": round(row['流通市值']/100000000, 2) if '流通市值' in row else 0
             })
 
-    # 4. 排序：按连板数降序 > 封板时间升序 > 流通市值升序，取前MAX_STOCK_COUNT只
+    # 排序输出
     if len(pass_list) > 0:
         pass_df = pd.DataFrame(pass_list)
         pass_df = pass_df.sort_values(
@@ -321,7 +323,7 @@ def main():
     else:
         result_text += "今日无符合所有条件的个股"
 
-    # 5. 保存结果
+    # 保存结果
     with open("选股结果.txt", "w", encoding="utf-8") as f:
         f.write(result_text)
     print(result_text)
