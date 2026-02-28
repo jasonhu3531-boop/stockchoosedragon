@@ -14,7 +14,7 @@ MAX_PRICE = 30
 MAX_STOCK_COUNT = 5
 # 市场环境核心阈值
 LIMIT_UP_MIN_COUNT = 35
-LIMIT_DOWN_MAX_COUNT = 8  # 临时不校验该值，设为默认
+LIMIT_DOWN_MAX_COUNT = 8
 MAX_LIANBAN_MIN_HEIGHT = 4
 EXPLODE_RATE_MAX = 35
 # ==============================================================================
@@ -79,30 +79,37 @@ def check_market_env(date: str = None):
         limit_up_count = len(limit_up_df)
 
         # 2. 非ST跌停家数（临时注释接口，避免报错，默认赋值0）
-        # 原报错接口：limit_down_df = ak.stock_limit_down_pool_em(date=date)
-        # limit_down_df = limit_down_df[~limit_down_df['名称'].str.contains('ST|退', na=False)]
         limit_down_count = 0  # 临时默认值，跳过跌停数校验
 
-        # 3. 市场最高连板高度（保留）
-        strong_df = ak.stock_zt_pool_strong_em(date=date)
-        max_lianban = strong_df['连板数'].max() if not strong_df.empty else 0
+        # 3. 市场最高连板高度（核心修复：改用涨停池接口+空数据容错）
+        max_lianban = 0
+        if not limit_up_df.empty:  # 先判断涨停池是否有数据
+            # 从涨停池提取连板数，避免strong_em接口的兼容性问题
+            max_lianban = limit_up_df['连板数'].max() if '连板数' in limit_up_df.columns else 0
 
-        # 4. 上证指数涨跌幅与5日趋势（保留）
+        # 4. 上证指数涨跌幅与5日趋势（保留+空数据容错）
+        index_day_drop = 0
+        index_5day_gain = 0
         index_df = ak.index_zh_a_hist(symbol="000001", period="daily", start_date=date, end_date=date)
-        index_close = index_df['收盘'].iloc[0]
-        index_open = index_df['开盘'].iloc[0]
-        index_day_drop = (index_close - index_open) / index_open * 100
-        start_5day = (datetime.strptime(date, "%Y%m%d") - timedelta(days=5)).strftime("%Y%m%d")
-        index_5day_df = ak.index_zh_a_hist(symbol="000001", period="daily", start_date=start_5day, end_date=date)
-        index_5day_gain = (index_5day_df['收盘'].iloc[-1] - index_5day_df['收盘'].iloc[0]) / index_5day_df['收盘'].iloc[0] * 100
+        if not index_df.empty and len(index_df) > 0:
+            index_close = index_df['收盘'].iloc[0]
+            index_open = index_df['开盘'].iloc[0]
+            index_day_drop = (index_close - index_open) / index_open * 100 if index_open != 0 else 0
+            
+            start_5day = (datetime.strptime(date, "%Y%m%d") - timedelta(days=5)).strftime("%Y%m%d")
+            index_5day_df = ak.index_zh_a_hist(symbol="000001", period="daily", start_date=start_5day, end_date=date)
+            if not index_5day_df.empty and len(index_5day_df) >= 2:
+                index_5day_gain = (index_5day_df['收盘'].iloc[-1] - index_5day_df['收盘'].iloc[0]) / index_5day_df['收盘'].iloc[0] * 100 if index_5day_df['收盘'].iloc[0] != 0 else 0
 
-        # 5. 炸板率（保留）
+        # 5. 炸板率（保留+空数据容错）
+        explode_rate = 100  # 默认炸板率100%（不达标）
         explode_df = ak.stock_zt_pool_zbgc_em(date=date)
-        explode_count = len(explode_df)
+        explode_count = len(explode_df) if not explode_df.empty else 0
         total_try_limit = limit_up_count + explode_count
-        explode_rate = explode_count / total_try_limit * 100 if total_try_limit > 0 else 100
+        if total_try_limit > 0:
+            explode_rate = explode_count / total_try_limit * 100
 
-        # 核心条件校验（跌停数已默认0，不影响校验）
+        # 核心条件校验
         core_pass = (
             limit_up_count >= LIMIT_UP_MIN_COUNT and
             limit_down_count <= LIMIT_DOWN_MAX_COUNT and
@@ -115,26 +122,33 @@ def check_market_env(date: str = None):
         if not core_pass:
             return False, f"市场环境不达标，不执行选股。涨停数:{limit_up_count},跌停数:{limit_down_count},最高连板:{max_lianban},炸板率:{explode_rate:.1f}%"
         
-        # 辅助条件校验（满足≥3个）
+        # 辅助条件校验（满足≥3个+空数据容错）
+        theme_ratio = 0
         theme_df = ak.stock_zt_pool_board_em(date=date)
-        top3_theme_limit = theme_df['涨停家数'].head(3).sum() if not theme_df.empty else 0
-        theme_ratio = top3_theme_limit / limit_up_count * 100 if limit_up_count > 0 else 0
+        if not theme_df.empty and '涨停家数' in theme_df.columns and limit_up_count > 0:
+            top3_theme_limit = theme_df['涨停家数'].head(3).sum()
+            theme_ratio = top3_theme_limit / limit_up_count * 100
 
+        limit_up_ring = 0
         yesterday = (datetime.strptime(date, "%Y%m%d") - timedelta(days=1)).strftime("%Y%m%d")
-        yesterday_limit_count = 0
         if is_trade_day(yesterday):
             yesterday_limit_df = ak.stock_zt_pool_em(date=yesterday)
             yesterday_limit_df = yesterday_limit_df[~yesterday_limit_df['名称'].str.contains('ST|退', na=False)]
             yesterday_limit_count = len(yesterday_limit_df)
-        limit_up_ring = limit_up_count / yesterday_limit_count if yesterday_limit_count > 0 else 0
+            if yesterday_limit_count > 0:
+                limit_up_ring = limit_up_count / yesterday_limit_count
 
+        north_money = -100  # 默认不达标
         north_df = ak.stock_em_hsgt_north_net_flow_in(symbol="北向资金")
-        north_money = north_df['净流入'].iloc[-1] if not north_df.empty else -100
+        if not north_df.empty and '净流入' in north_df.columns:
+            north_money = north_df['净流入'].iloc[-1] if len(north_df) > 0 else -100
 
+        up_down_ratio = 0
         activity_df = ak.stock_market_activity_legu_em()
-        up_count = activity_df['上涨家数'].iloc[0]
-        down_count = activity_df['下跌家数'].iloc[0]
-        up_down_ratio = up_count / down_count if down_count > 0 else 0
+        if not activity_df.empty and '上涨家数' in activity_df.columns and '下跌家数' in activity_df.columns:
+            up_count = activity_df['上涨家数'].iloc[0]
+            down_count = activity_df['下跌家数'].iloc[0]
+            up_down_ratio = up_count / down_count if down_count > 0 else 0
 
         assist_conditions = [
             theme_ratio >= 60,
@@ -152,17 +166,25 @@ def check_market_env(date: str = None):
         return False, f"环境判定出错：{str(e)}"
 
 def filter_stock_basic(stock_code: str, stock_name: str, date: str = None):
-    """个股基础筛选，返回是否通过"""
+    """个股基础筛选，返回是否通过+空数据容错"""
     if date is None:
         date = datetime.now().strftime("%Y%m%d")
     try:
         # 1. 基础属性筛选（已适配你的参数）
         info_df = ak.stock_individual_info_em(symbol=stock_code)
+        if info_df.empty or len(info_df) < 1:
+            return False
         info_dict = dict(zip(info_df['item'], info_df['value']))
+        # 关键字段容错
+        if '流通市值' not in info_dict or '最新价' not in info_dict or '上市时间' not in info_dict:
+            return False
         circ_market_cap = info_dict['流通市值'] / 100000000
         price = info_dict['最新价']
         list_date = info_dict['上市时间']
-        list_days = (datetime.strptime(date, "%Y%m%d") - datetime.strptime(list_date, "%Y%m%d")).days
+        try:
+            list_days = (datetime.strptime(date, "%Y%m%d") - datetime.strptime(list_date, "%Y%m%d")).days
+        except:
+            return False
 
         basic_pass = (
             MIN_CIRC_MARKET_CAP <= circ_market_cap <= MAX_CIRC_MARKET_CAP and
@@ -173,10 +195,13 @@ def filter_stock_basic(stock_code: str, stock_name: str, date: str = None):
         if not basic_pass:
             return False
 
-        # 2. 量能指标筛选
+        # 2. 量能指标筛选+容错
         start_10day = (datetime.strptime(date, "%Y%m%d") - timedelta(days=10)).strftime("%Y%m%d")
         hist_df = ak.stock_zh_a_hist(symbol=stock_code, period="daily", start_date=start_10day, end_date=date)
-        if len(hist_df) < 2:
+        if hist_df.empty or len(hist_df) < 2:
+            return False
+        # 量能字段容错
+        if '换手率' not in hist_df.columns or '量比' not in hist_df.columns or '成交量' not in hist_df.columns:
             return False
         turnover = hist_df['换手率'].iloc[-1]
         volume_ratio = hist_df['量比'].iloc[-1]
@@ -191,7 +216,7 @@ def filter_stock_basic(stock_code: str, stock_name: str, date: str = None):
         if not volume_pass:
             return False
 
-        # 3. 趋势指标筛选
+        # 3. 趋势指标筛选+容错
         ma5 = hist_df['收盘'].rolling(5).mean().iloc[-1]
         ma5_prev = hist_df['收盘'].rolling(5).mean().iloc[-2]
         ma20 = hist_df['收盘'].rolling(20).mean().iloc[-1]
@@ -205,11 +230,14 @@ def filter_stock_basic(stock_code: str, stock_name: str, date: str = None):
         if not trend_pass:
             return False
 
-        # 4. 涨停质量筛选
+        # 4. 涨停质量筛选+容错
         zt_df = ak.stock_zt_pool_em(date=date)
-        if stock_code not in zt_df['代码'].values:
+        if zt_df.empty or stock_code not in zt_df['代码'].values:
             return False
         stock_zt = zt_df[zt_df['代码'] == stock_code].iloc[0]
+        # 涨停质量字段容错
+        if '首次封板时间' not in stock_zt or '炸板次数' not in stock_zt or '封单金额' not in stock_zt:
+            return False
         first_board_time = stock_zt['首次封板时间']
         explode_times = stock_zt['炸板次数']
         board_order_amount = stock_zt['封单金额'] / 100000000
@@ -273,10 +301,10 @@ def main():
             pass_list.append({
                 "代码": stock_code,
                 "名称": stock_name,
-                "连板数": row['连板数'],
-                "类型": get_stock_type(row['连板数']),
-                "封板时间": row['首次封板时间'],
-                "流通市值(亿)": round(row['流通市值']/100000000, 2)
+                "连板数": row['连板数'] if '连板数' in row else 0,
+                "类型": get_stock_type(row['连板数'] if '连板数' in row else 0),
+                "封板时间": row['首次封板时间'] if '首次封板时间' in row else "未知",
+                "流通市值(亿)": round(row['流通市值']/100000000, 2) if '流通市值' in row else 0
             })
 
     # 4. 排序：按连板数降序 > 封板时间升序 > 流通市值升序，取前MAX_STOCK_COUNT只
