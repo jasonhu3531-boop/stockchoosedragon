@@ -3,16 +3,19 @@ on:
   schedule:
     # 仅A股交易日北京时间15:30收盘后运行1次（UTC时间7:30，周一到周五）
     - cron: '30 7 * * 1-5'
-  workflow_dispatch: # 保留手动触发功能，随时可以手动运行
+  workflow_dispatch: # 保留手动触发功能
 
 jobs:
   auto-select-stock:
     runs-on: ubuntu-latest
+    permissions: # 新增：显式授予写入权限
+      contents: write
     steps:
       - name: 拉取仓库代码
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false # 关键：禁用默认凭证，使用后续配置的token
 
       - name: 设置Python环境
         uses: actions/setup-python@v5
@@ -35,6 +38,6 @@ jobs:
           git config --local user.name "github-actions[bot]"
           git add 选股结果.txt
           git commit -m "自动更新：$(date +'%Y-%m-%d')收盘选股结果" || echo "无结果更新"
-          git push
+          git push "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" HEAD:main
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
