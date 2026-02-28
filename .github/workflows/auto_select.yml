@@ -8,14 +8,14 @@ on:
 jobs:
   auto-select-stock:
     runs-on: ubuntu-latest
-    permissions: # 新增：显式授予写入权限
+    permissions: # 显式授予写入权限
       contents: write
     steps:
       - name: 拉取仓库代码
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          persist-credentials: false # 关键：禁用默认凭证，使用后续配置的token
+          persist-credentials: false
 
       - name: 设置Python环境
         uses: actions/setup-python@v5
