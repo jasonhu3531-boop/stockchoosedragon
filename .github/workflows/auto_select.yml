@@ -1,43 +1,61 @@
+# 工作流名称（可自定义）
 name: 每日龙头股自动选股
-on:
-  schedule:
-    # 仅A股交易日北京时间15:30收盘后运行1次（UTC时间7:30，周一到周五）
-    - cron: '30 7 * * 1-5'
-  workflow_dispatch: # 保留手动触发功能
 
+# 触发规则：定时+手动触发（双保险）
+on:
+  # 定时运行：每天北京时间14:00（A股收盘后），UTC时间是6:00（UTC+8时差）
+  schedule:
+    - cron: '0 6 * * *'
+  # 手动触发（随时可以点运行）
+  workflow_dispatch:
+
+# 任务配置
 jobs:
-  auto-select-stock:
+  run-stock-selection:
+    # 运行环境：Ubuntu最新版（兼容所有Python包）
     runs-on: ubuntu-latest
-    permissions: # 显式授予写入权限
-      contents: write
+    # 任务步骤
     steps:
+      # 步骤1：拉取仓库最新代码到运行环境
       - name: 拉取仓库代码
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-          persist-credentials: false
+          persist-credentials: true  # 保留Git凭证，用于后续推送文件
+          fetch-depth: 0  # 拉取完整仓库历史，避免提交冲突
 
-      - name: 设置Python环境
+      # 步骤2：配置Python环境（适配akshare）
+      - name: 安装Python 3.9
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
-          cache: 'pip'
+          python-version: '3.9'  # 稳定兼容akshare的版本
+          cache: 'pip'  # 缓存依赖，加速运行
 
-      - name: 安装依赖
+      # 步骤3：安装选股脚本所需依赖
+      - name: 安装依赖包
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install akshare pandas requests urllib3
 
-      - name: 执行选股程序
-        run: |
-          python main.py
+      # 步骤4：执行选股脚本（生成选股结果.txt）
+      - name: 运行龙头选股程序
+        run: python main.py
 
-      - name: 提交选股结果到仓库
-        run: |
-          git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          git config --local user.name "github-actions[bot]"
-          git add 选股结果.txt
-          git commit -m "自动更新：$(date +'%Y-%m-%d')收盘选股结果" || echo "无结果更新"
-          git push "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" HEAD:main
+      # 步骤5：核心！提交并推送结果文件到仓库（解决不更新问题）
+      - name: 提交并推送选股结果
         env:
+          # 使用GitHub内置令牌授权推送
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 配置Git用户信息（固定，无需修改）
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+          
+          # 添加结果文件（重点：文件名必须和main.py中一致！）
+          # 如果你的文件是「龙头选股结果.txt」，把下面的"选股结果.txt"替换掉
+          git add 选股结果.txt
+          
+          # 提交（无变更时不报错）
+          git commit -m "自动更新：$(date +'%Y-%m-%d %H:%M:%S')收盘选股结果" || echo "无文件变更，无需提交"
+          
+          # 推送文件到仓库（分支名重点：默认是main，老仓库可能是master，按需修改）
+          git push origin main
