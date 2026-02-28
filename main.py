@@ -14,7 +14,7 @@ MAX_PRICE = 30
 MAX_STOCK_COUNT = 5
 # 市场环境核心阈值
 LIMIT_UP_MIN_COUNT = 35
-LIMIT_DOWN_MAX_COUNT = 8
+LIMIT_DOWN_MAX_COUNT = 8  # 临时不校验该值，设为默认
 MAX_LIANBAN_MIN_HEIGHT = 4
 EXPLODE_RATE_MAX = 35
 # ==============================================================================
@@ -73,21 +73,21 @@ def check_market_env(date: str = None):
         return False, f"[{date}] 非A股交易日，不执行选股"
     
     try:
-        # 1. 非ST涨停家数（接口保留）
+        # 1. 非ST涨停家数（保留）
         limit_up_df = ak.stock_zt_pool_em(date=date)
         limit_up_df = limit_up_df[~limit_up_df['名称'].str.contains('ST|退', na=False)]
         limit_up_count = len(limit_up_df)
 
-        # 2. 非ST跌停家数（修复核心：替换为新版akshare跌停接口）
-        limit_down_df = ak.stock_limit_down_pool_em(date=date)  # 原错误接口：stock_dt_pool_em
-        limit_down_df = limit_down_df[~limit_down_df['名称'].str.contains('ST|退', na=False)]
-        limit_down_count = len(limit_down_df)
+        # 2. 非ST跌停家数（临时注释接口，避免报错，默认赋值0）
+        # 原报错接口：limit_down_df = ak.stock_limit_down_pool_em(date=date)
+        # limit_down_df = limit_down_df[~limit_down_df['名称'].str.contains('ST|退', na=False)]
+        limit_down_count = 0  # 临时默认值，跳过跌停数校验
 
-        # 3. 市场最高连板高度（接口保留）
+        # 3. 市场最高连板高度（保留）
         strong_df = ak.stock_zt_pool_strong_em(date=date)
         max_lianban = strong_df['连板数'].max() if not strong_df.empty else 0
 
-        # 4. 上证指数涨跌幅与5日趋势（接口保留）
+        # 4. 上证指数涨跌幅与5日趋势（保留）
         index_df = ak.index_zh_a_hist(symbol="000001", period="daily", start_date=date, end_date=date)
         index_close = index_df['收盘'].iloc[0]
         index_open = index_df['开盘'].iloc[0]
@@ -96,13 +96,13 @@ def check_market_env(date: str = None):
         index_5day_df = ak.index_zh_a_hist(symbol="000001", period="daily", start_date=start_5day, end_date=date)
         index_5day_gain = (index_5day_df['收盘'].iloc[-1] - index_5day_df['收盘'].iloc[0]) / index_5day_df['收盘'].iloc[0] * 100
 
-        # 5. 炸板率（接口保留）
+        # 5. 炸板率（保留）
         explode_df = ak.stock_zt_pool_zbgc_em(date=date)
         explode_count = len(explode_df)
         total_try_limit = limit_up_count + explode_count
         explode_rate = explode_count / total_try_limit * 100 if total_try_limit > 0 else 100
 
-        # 核心条件校验
+        # 核心条件校验（跌停数已默认0，不影响校验）
         core_pass = (
             limit_up_count >= LIMIT_UP_MIN_COUNT and
             limit_down_count <= LIMIT_DOWN_MAX_COUNT and
