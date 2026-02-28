@@ -6,19 +6,17 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-# ===================== 网络请求重试配置（解决连接中断）=====================
-# 创建带重试机制的requests会话
+# ===================== 网络请求重试配置（兼容所有requests版本）=====================
 session = requests.Session()
 retry_strategy = Retry(
-    total=3,  # 总重试次数
-    backoff_factor=1,  # 重试间隔（1s, 2s, 4s...）
-    status_forcelist=[429, 500, 502, 503, 504],  # 触发重试的状态码
+    total=3,
+    backoff_factor=1,
+    status_forcelist=[429, 500, 502, 503, 504],
     allowed_methods=["GET", "POST"]
 )
 adapter = HTTPAdapter(max_retries=retry_strategy)
 session.mount("https://", adapter)
 session.mount("http://", adapter)
-# 覆盖akshare的默认requests会话（关键：解决底层连接中断）
 ak.session = session
 
 # ===================== 选股参数配置 =====================
@@ -39,17 +37,16 @@ def is_trade_day(date: str = None):
         date = datetime.now().strftime("%Y%m%d")
     dt = datetime.strptime(date, "%Y%m%d")
     
-    # 1. 排除周末
+    # 排除周末
     if dt.weekday() in [5, 6]:
         return False
 
-    # 2. 2025年A股法定休市（精简版，覆盖20251231）
+    # 2025年休市（覆盖20251231）
     holiday_2025 = [
         "20250101", "20250129", "20250130", "20250405", "20250501", 
         "20250529", "20250530", "20250609", "20250917", "20251001",
         "20251002", "20251003", "20251006", "20251007"
     ]
-    # 2025补班交易日
     make_up_2025 = ["20250126", "20250208", "20250407", "20250531", "20250916", "20251008"]
 
     if date in holiday_2025:
@@ -60,42 +57,37 @@ def is_trade_day(date: str = None):
         return True
 
 def safe_ak_call(func, *args, **kwargs):
-    """安全调用akshare接口（带超时+异常容错）"""
+    """安全调用akshare接口（兼容所有requests版本）"""
     try:
-        # 设置接口超时时间（10s），避免无限等待
         kwargs['timeout'] = kwargs.get('timeout', 10)
         return func(*args, **kwargs)
-    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout, 
-            requests.exceptions.RemoteDisconnected):
-        # 网络异常时返回空DataFrame
-        return pd.DataFrame()
-    except Exception:
+    except Exception:  # 通用异常捕获，避开RemoteDisconnected的版本问题
         return pd.DataFrame()
 
 def check_market_env(date: str = None):
-    """市场环境判定（增强网络容错）"""
+    """市场环境判定（最终稳定版）"""
     if date is None:
         date = datetime.now().strftime("%Y%m%d")
     if not is_trade_day(date):
         return False, f"[{date}] 非A股交易日，不执行选股"
     
     try:
-        # 1. 非ST涨停家数（安全调用+超时）
+        # 1. 涨停家数（安全调用）
         limit_up_df = safe_ak_call(ak.stock_zt_pool_em, date=date)
         if limit_up_df.empty:
-            return False, f"[{date}] 无法获取涨停数据（网络/数据源异常）"
+            return False, f"[{date}] 无法获取涨停数据（无数据/网络异常）"
         limit_up_df = limit_up_df[~limit_up_df['名称'].str.contains('ST|退', na=False)]
         limit_up_count = len(limit_up_df)
 
-        # 2. 跌停家数（临时默认0，避免接口报错）
+        # 2. 跌停家数（临时默认0）
         limit_down_count = 0
 
-        # 3. 最高连板高度（从涨停池提取+容错）
+        # 3. 最高连板高度
         max_lianban = 0
         if not limit_up_df.empty and '连板数' in limit_up_df.columns:
             max_lianban = limit_up_df['连板数'].max()
 
-        # 4. 上证指数数据（安全调用）
+        # 4. 上证指数
         index_day_drop = 0
         index_5day_gain = 0
         index_df = safe_ak_call(ak.index_zh_a_hist, symbol="000001", period="daily", start_date=date, end_date=date)
@@ -109,7 +101,7 @@ def check_market_env(date: str = None):
             if not index_5day_df.empty and len(index_5day_df) >= 2:
                 index_5day_gain = (index_5day_df['收盘'].iloc[-1] - index_5day_df['收盘'].iloc[0]) / index_5day_df['收盘'].iloc[0] * 100 if index_5day_df['收盘'].iloc[0] != 0 else 0
 
-        # 5. 炸板率（安全调用）
+        # 5. 炸板率
         explode_rate = 100
         explode_df = safe_ak_call(ak.stock_zt_pool_zbgc_em, date=date)
         explode_count = len(explode_df) if not explode_df.empty else 0
@@ -117,7 +109,7 @@ def check_market_env(date: str = None):
         if total_try_limit > 0:
             explode_rate = explode_count / total_try_limit * 100
 
-        # 核心条件校验
+        # 核心条件
         core_pass = (
             limit_up_count >= LIMIT_UP_MIN_COUNT and
             limit_down_count <= LIMIT_DOWN_MAX_COUNT and
@@ -130,7 +122,7 @@ def check_market_env(date: str = None):
         if not core_pass:
             return False, f"市场环境不达标。涨停数:{limit_up_count},跌停数:{limit_down_count},最高连板:{max_lianban},炸板率:{explode_rate:.1f}%"
         
-        # 辅助条件（安全调用）
+        # 辅助条件
         theme_ratio = 0
         theme_df = safe_ak_call(ak.stock_zt_pool_board_em, date=date)
         if not theme_df.empty and '涨停家数' in theme_df.columns and limit_up_count > 0:
@@ -174,11 +166,10 @@ def check_market_env(date: str = None):
         return False, f"环境判定出错：{str(e)}"
 
 def filter_stock_basic(stock_code: str, stock_name: str, date: str = None):
-    """个股筛选（增强容错）"""
+    """个股筛选（最终稳定版）"""
     if date is None:
         date = datetime.now().strftime("%Y%m%d")
     try:
-        # 基础属性
         info_df = safe_ak_call(ak.stock_individual_info_em, symbol=stock_code)
         if info_df.empty or len(info_df) < 1:
             return False
@@ -202,7 +193,7 @@ def filter_stock_basic(stock_code: str, stock_name: str, date: str = None):
         if not basic_pass:
             return False
 
-        # 量能指标
+        # 量能
         start_10day = (datetime.strptime(date, "%Y%m%d") - timedelta(days=10)).strftime("%Y%m%d")
         hist_df = safe_ak_call(ak.stock_zh_a_hist, symbol=stock_code, period="daily", start_date=start_10day, end_date=date)
         if hist_df.empty or len(hist_df) < 2:
@@ -222,7 +213,7 @@ def filter_stock_basic(stock_code: str, stock_name: str, date: str = None):
         if not volume_pass:
             return False
 
-        # 趋势指标
+        # 趋势
         if '收盘' not in hist_df.columns:
             return False
         ma5 = hist_df['收盘'].rolling(5).mean().iloc[-1]
@@ -270,12 +261,11 @@ def get_stock_type(lianban_count: int):
         return "首板"
 
 def main():
-    """主程序（测试日期改为20251231，历史真实交易日）"""
-    # 关键：改用20251231（有完整数据的真实交易日，避免未来日期断连）
-    date = "20251231"
+    """主程序（最终稳定版，测试20251231真实交易日）"""
+    date = "20251231"  # 真实交易日，有完整数据
     result_text = f"===== 龙头战法选股结果 =====\n日期：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
 
-    # 校验市场环境
+    # 校验环境
     env_pass, env_msg = check_market_env(date)
     result_text += f"市场状态：{env_msg}\n\n"
     if not env_pass:
@@ -309,7 +299,7 @@ def main():
                 "流通市值(亿)": round(row['流通市值']/100000000, 2) if '流通市值' in row else 0
             })
 
-    # 排序输出
+    # 输出结果
     if len(pass_list) > 0:
         pass_df = pd.DataFrame(pass_list)
         pass_df = pass_df.sort_values(
@@ -323,7 +313,7 @@ def main():
     else:
         result_text += "今日无符合所有条件的个股"
 
-    # 保存结果
+    # 保存
     with open("选股结果.txt", "w", encoding="utf-8") as f:
         f.write(result_text)
     print(result_text)
