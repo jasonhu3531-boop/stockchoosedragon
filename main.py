@@ -21,7 +21,7 @@ EXPLODE_RATE_MAX = 35
 
 def is_trade_day(date: str = None):
     """
-    强制精准判断A股交易日（弃用接口，用本地规则，避免2026年数据缺失）
+    强制精准判断A股交易日（弃用接口，用本地规则）
     :param date: 日期，格式YYYYMMDD
     :return: True/False
     """
@@ -36,7 +36,7 @@ def is_trade_day(date: str = None):
     if dt.weekday() in [5, 6]:
         return False
 
-    # 2. 2026年A股法定休市（精准罗列，覆盖春节+后续主要节假日）
+    # 2. 2026年A股法定休市（精准罗列）
     holiday_2026 = [
         # 春节休市
         "20260216", "20260217", "20260218", "20260219", "20260220", "20260221", "20260222",
@@ -52,18 +52,17 @@ def is_trade_day(date: str = None):
         "20261001", "20261002", "20261003", "20261004", "20261005", "20261006", "20261007"
     ]
 
-    # 3. 2026年A股补班交易日（周末补班，需判定为交易日）
+    # 3. 2026年A股补班交易日（周末补班）
     make_up_2026 = [
         "20260215", "20260407", "20260509", "20260622", "20260928", "20261010"
     ]
 
-    # 最终判断
+    # 最终判断：20260227不在休市清单+是工作日 → 判定为交易日
     if date in holiday_2026:
         return False
     elif date in make_up_2026:
         return True
     else:
-        # 非周末、非休市、非补班的工作日 = 正常交易日
         return True
 
 def check_market_env(date: str = None):
@@ -237,9 +236,8 @@ def get_stock_type(lianban_count: int):
 
 def main():
     """主选股程序"""
-    # 【测试专用】临时强制指定日期为20260228
-    date = "20260228"
-    # 原代码（测试完成后恢复）：date = datetime.now().strftime("%Y%m%d")
+    # 【20260227测试专用】强制指定日期为昨日（A股正常交易日）
+    date = "20260227"
     result_text = f"===== 龙头战法选股结果 =====\n日期：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
 
     # 1. 校验市场环境
